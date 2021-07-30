@@ -1,0 +1,289 @@
+﻿@using SearchEngine.Services
+@using System.Net;
+@using SearchEngine.Models
+@using HtmlAgilityPack
+@inject AuthenticationStateProvider authProvider
+@inject NavigationManager NavManager
+@inject HistoryDataAccessService historyDataAccessService
+
+<form @onsubmit="() => HandleSearch(GoogleSearch)">
+    <div class="form-group">
+        <input type="search" id="search-box-input" @bind="StringToSearch" placeholder="Search..." class="form-control" />
+    </div>
+    <div class="d-flex justify-content-around">
+        <button type="button" class="btn btn-primary" @onclick="() => HandleSearch(GoogleSearch)">Search Google</button>
+        <button type="button" class="btn btn-primary" @onclick="() => HandleSearch(RedditSearch)">Search Reddit</button>
+        <button type="button" class="btn btn-primary" @onclick="() => HandleSearch(StackOverflowSearch)">Search StackOverflow</button>
+    </div>
+</form>
+
+
+@if (Loading) { 
+    <p>Loading...</p>
+}
+@if (RedirectUrl != "" && RedirectUrl != null)
+{
+    @if (SearchResults != null)
+    {
+
+
+        <div class="pt-5 pb-5">
+            <h2>Results:</h2>
+            @foreach (var res in SearchResults)
+            {
+                <p>@res.Text</p>
+                <p>@res.Description</p>
+                <p>@res.Url</p>
+            }
+        </div>
+
+        <div class="pt-5 pb-5">
+            <h2>Results:</h2>
+            <a href="@RedirectUrl"><span class="text-lg-center">View Results for @String.Format("{0}{1}{0} on {0}www.{2}.com{0}", '"', StringToSearch, SelectedSite) <span class="oi oi-external-link"></span></span></a>
+        </div>
+    }
+}
+
+
+
+<hr class="mt-lg-5 p-2" />
+<h2 class="">Previous Searches</h2>
+@if (SignedIn)
+{
+    if (UserSearchHistory != null)
+    {
+        <div class="card">
+            <div class="card-header">
+                <ul class="nav nav-tabs card-header-tabs">
+                    <li class="nav-item">
+
+                        <button class="nav-link @AddActiveClass(AllSearchesActive)" @onclick="() => {UpdateSearchHistoryFilters(UserSearchHistory, true, false, false, false);}">All Searches</button>
+
+                    </li>
+                    <li class="nav-item">
+                        @if (RedditHistory != null)
+                        {
+                            <button class="nav-link @AddActiveClass(RedditSearchesActive)" @onclick="() => {UpdateSearchHistoryFilters(RedditHistory, false, true, false, false);}">Reddit Searches</button>
+                        }
+                        else
+                        {
+                            <button class="nav-link disabled">Reddit Searches</button>
+                        }
+
+                    </li>
+                    <li class="nav-item">
+                        @if (StackOverflowHistory != null)
+                        {
+                            <button class="nav-link @AddActiveClass(StackOverflowSearchesActive)" @onclick="() => {UpdateSearchHistoryFilters(StackOverflowHistory, false, false, true, false);}">StackOverflow Searches</button>
+                        }
+                        else
+                        {
+                            <button class="nav-link disabled" href="#">StackOverflow Searches</button>
+                        }
+                    </li>
+                    <li class="nav-item">
+                        @if (GoogleHistory != null)
+                        {
+                            <button class="nav-link @AddActiveClass(GoogleSearchesActive)" @onclick="() => {UpdateSearchHistoryFilters(GoogleHistory, false, false, false, true);}">Google Searches</button>
+                        }
+                        else
+                        {
+                            <button class="nav-link disabled" href="#">Google Only Searches</button>
+
+                        }
+                    </li>
+                </ul>
+            </div>
+            <div class="card-body">
+                <h5 class="card-title">@ActiveTitle</h5>
+                @foreach (var x in ActiveTab)
+                {
+                    <div class="p-3 card- d-flex justify-content-between">
+                        <a href="@FormatSearchHistoryLink(x.SearchTerm,x.Site)">
+                            "@x.SearchTerm" on "@x.Site"
+                            <span class="oi oi-external-link"></span>
+                        </a>
+                        <span @onclick="() => {ActiveTab = ActiveTab.Where(q => q.SearchId != x.SearchId);DeleteSearchHistoryLink(x);}">Remove <span class="oi oi-x"></span></span>
+                    </div>
+                }
+            </div>
+        </div>
+    }
+
+    if (UserSearchHistory.Count < 1)
+    {
+        <h5>No Search History Found. Start searching!</h5>
+    }
+}
+
+@if (!SignedIn)
+{
+    <h5>Please Sign In to view search history</h5>
+}
+
+@code {
+    #region Search Variables
+    // Define user search and bind it to input
+    private string StringToSearch { get; set; }
+    private string RedirectUrl { get; set; }
+    private string SelectedSite { get; set; }
+
+    // Define strings that can be passed in to identify which site to search
+    private string GoogleSearch = "google";
+    private string RedditSearch = "reddit";
+    private string StackOverflowSearch = "stackoverflow";
+
+    // Define strings to be used later in assorted functions
+    private string DefaultGoogleUrl = "https://www.google.com/search?igu=1&q=";
+    private string SiteExtension = "+site%3Awww.{0}.com";
+    #endregion
+
+    #region History Variables
+    //Get userid and signin info
+    private string UserId;
+    private bool SignedIn;
+
+    // Get User searches and categorize
+    private List<SearchHistory> UserSearchHistory;
+    private List<SearchResult> SearchResults;
+    private IEnumerable<SearchHistory> RedditHistory = null;
+    private IEnumerable<SearchHistory> StackOverflowHistory = null;
+    private IEnumerable<SearchHistory> GoogleHistory = null;
+
+    //define filters
+    private IEnumerable<SearchHistory> ActiveTab;
+    private string ActiveTitle;
+    private bool AllSearchesActive;
+    private bool RedditSearchesActive;
+    private bool StackOverflowSearchesActive;
+    private bool GoogleSearchesActive;
+    private bool Loading;
+    #endregion
+
+    protected override async Task OnInitializedAsync()
+    {
+        SignedIn = authProvider.GetAuthenticationStateAsync().Result.User.Identity.IsAuthenticated;
+        UserId = authProvider.GetAuthenticationStateAsync().Result.User.Identity.Name;
+        if (SignedIn)
+        {
+            UpdateUserSearchHistory(true);
+        }
+
+    }
+
+    private void UpdateUserSearchHistory(bool resetFilters)
+    {
+        // Get all user search history and categorize it
+        UserSearchHistory = historyDataAccessService.GetAllUserSearches(UserId);
+        RedditHistory = UserSearchHistory.Where(x => x.Site.ToLower().Equals("reddit"));
+        StackOverflowHistory = UserSearchHistory.Where(x => x.Site.ToLower().Equals("stackoverflow"));
+        GoogleHistory = UserSearchHistory.Where(x => x.Site.ToLower().Equals("google"));
+        if (resetFilters)
+        {
+            if (UserSearchHistory != null)
+            {
+                UpdateSearchHistoryFilters(UserSearchHistory, true, false, false, false);
+            }
+
+        }
+
+    }
+
+    private void UpdateSearchHistoryFilters(IEnumerable<SearchHistory> activeHistory, bool all, bool reddit, bool stack, bool google)
+    {
+        ActiveTab = activeHistory;
+        AllSearchesActive = all;
+        RedditSearchesActive = reddit;
+        StackOverflowSearchesActive = stack;
+        GoogleSearchesActive = google;
+        if (all)
+        {
+            ActiveTitle = "All Searches";
+        }
+        else if (reddit)
+        {
+            ActiveTitle = "Reddit Searches";
+        }
+        else if (stack)
+        {
+            ActiveTitle = "StackOverflow Searches";
+        }
+        else if (google)
+        {
+            ActiveTitle = "Google Searches";
+        }
+    }
+
+    private async Task HandleSearch(string typeOfSearch)
+    {
+        RedirectUrl = "";
+        //If user enters something
+        if (!string.IsNullOrWhiteSpace(StringToSearch))
+        {
+            Loading = true;
+            string finalUrl = FormatSearchHistoryLink(StringToSearch, typeOfSearch);
+
+            var htmlWeb = new HtmlWeb();
+            var query = finalUrl;
+            var doc = await htmlWeb.LoadFromWebAsync(query);
+
+            var response = doc.DocumentNode.ChildNodes.Last();
+            var results = response.SelectNodes("//div[@class='g']");
+            if (results == null)
+            {
+                return;
+            }
+            var searchResults = new List<SearchResult>();
+            foreach (var result in results)
+            {
+                var description = result.InnerText;
+                var refNode = result.Element("div").Element("div").Element("div").Element("a");
+                var url = refNode.Attributes["href"].Value;
+                var text = refNode.InnerText;
+                searchResults.Add(new SearchResult(text, url, description));
+            }
+            SearchResults = searchResults.ToList();
+            SelectedSite = typeOfSearch;
+            RedirectUrl = finalUrl;
+            Loading = false;
+            if (SignedIn)
+            {
+                SearchHistory search = new SearchHistory();
+                search.UserId = UserId;
+                search.SearchTerm = StringToSearch;
+                search.Site = SelectedSite;
+                await historyDataAccessService.InsertSearchHistoryAsync(search);
+            }
+        }
+    }
+
+
+
+    private async void DeleteSearchHistoryLink(SearchHistory search)
+    {
+        await historyDataAccessService.DeleteSearchAsync(search);
+        UpdateUserSearchHistory(false);
+    }
+
+    private string FormatSearchHistoryLink(string searchTerm, string site)
+    {
+        // Make search string url friendly, and format return string
+        string CleanedUserSearchTerm = WebUtility.UrlEncode(searchTerm);
+        string finalUrl = String.Format("{0}{1}", DefaultGoogleUrl, CleanedUserSearchTerm);
+        if (site != "google")
+        {
+            finalUrl += String.Format("+site%3Awww.{0}.com", site);
+        }
+        return finalUrl;
+    }
+
+    private string AddActiveClass(bool active)
+    {
+        string returnString = "";
+        if (active)
+        {
+            returnString = "active";
+        }
+        return returnString;
+    }
+}
